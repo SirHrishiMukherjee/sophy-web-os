@@ -964,6 +964,21 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 def index():
     return render_template("index.html")
 
+@app.route("/debug/disk")
+def debug_disk():
+    import os
+
+    root = "/var/data"   # your Render Disk mount
+    result = []
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel = os.path.relpath(dirpath, root)
+        result.append(f"[DIR]  {rel}")
+        for f in filenames:
+            result.append(f"      - {f}")
+
+    return "<pre>" + "\n".join(result) + "</pre>"
+
 @socketio.on("command")
 def handle_command(data):
     print("[RECEIVED COMMAND]", data)   # <-- add this
