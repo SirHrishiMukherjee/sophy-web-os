@@ -632,48 +632,67 @@ class SubservienceManager:
         return max(dirs, key=os.path.getmtime)
 
     def raise_priority(self, sub_id: str):
-        if sub_id not in self.subservience:
+        # Find all runtime instances that belong to this subservient_id
+        matches = [
+            key for key, rec in self.subservience.items()
+            if rec.subservient_id == sub_id
+        ]
+
+        if not matches:
             return f"Subservient '{sub_id}' does not exist."
 
-        self.subservience[sub_id].priority += 1
-        new_p = self.subservience[sub_id].priority
+        # Raise priority on ALL matching runtime instances
+        new_priorities = []
+        for key in matches:
+            rec = self.subservience[key]
+            rec.priority += 1
+            new_priorities.append(rec.priority)
 
-        try:
-            conn = db_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE subservients SET priority = %s WHERE subservient_id = %s",
-                (new_p, sub_id)
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-        except Exception as e:
-            print("[DB ERROR raise_priority]", e)
+            # Also update DB
+            try:
+                conn = db_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE subservients SET priority = %s WHERE subservient_id = %s",
+                    (rec.priority, sub_id)
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception as e:
+                print("[DB ERROR raise_priority]", e)
 
-        return f"Raised priority of '{sub_id}' to {new_p}"
+        return f"Raised priority of '{sub_id}' to {new_priorities}."
 
     def lower_priority(self, sub_id: str):
-        if sub_id not in self.subservience:
+        matches = [
+            key for key, rec in self.subservience.items()
+            if rec.subservient_id == sub_id
+        ]
+
+        if not matches:
             return f"Subservient '{sub_id}' does not exist."
 
-        self.subservience[sub_id].priority -= 1
-        new_p = self.subservience[sub_id].priority
+        new_priorities = []
+        for key in matches:
+            rec = self.subservience[key]
+            rec.priority -= 1
+            new_priorities.append(rec.priority)
 
-        try:
-            conn = db_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE subservients SET priority = %s WHERE subservient_id = %s",
-                (new_p, sub_id)
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-        except Exception as e:
-            print("[DB ERROR raise_priority]", e)
+            try:
+                conn = db_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE subservients SET priority = %s WHERE subservient_id = %s",
+                    (rec.priority, sub_id)
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception as e:
+                print("[DB ERROR lower_priority]", e)
 
-        return f"Raised priority of '{sub_id}' to {new_p}"
+        return f"Lowered priority of '{sub_id}' to {new_priorities}."
 
     def list_ordered(self) -> str:
         if not self.subservience:
