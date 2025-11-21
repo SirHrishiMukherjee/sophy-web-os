@@ -3,4 +3,4 @@ flask-socketio
 eventlet
 python-dotenv
 openai
-filelock
+psycopg2-binary

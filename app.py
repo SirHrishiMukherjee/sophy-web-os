@@ -7,7 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Dict
 import random
-from filelock import FileLock
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # ===========================
 # SUDO STATE
@@ -36,18 +37,34 @@ sudo_state = SudoState()
 # SELECTIVE MASTER LOGGING
 # ====================================================
 
-DISK_BASE = "/var/data"  # persistent Render Disk
-log_folder = os.path.join(DISK_BASE, "Sophy_MasterLog")
-os.makedirs(log_folder, exist_ok=True)
-MASTER_LOG_PATH = os.path.join(log_folder, "sophy_master_log.txt")
-lock_path = MASTER_LOG_PATH + ".lock"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 def master_log(*args, **kwargs):
-    """Selective Sophy master logger. Only called by engines."""
+    """Write master log lines into Render PostgreSQL."""
     text = " ".join(str(a) for a in args)
-    with FileLock(lock_path):
-        with open(MASTER_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(text + "\n")
+
+    if not DATABASE_URL:
+        print("[MASTER_LOG WARNING] DATABASE_URL not set. Falling back to console.")
+        print(text)
+        return
+
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO sophy_master_log (text) VALUES (%s)",
+            (text,)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        print("[MASTER_LOG ERROR]", e)
+        print("[MASTER_LOG FALLBACK]", text)
+
+def db_conn():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
@@ -72,10 +89,6 @@ IMITATION_CONTEXT = (
     "behavior of the original subservient without creative deviation. "
     "Reinforce all of its patterns, phrasing, and intentions."
 )
-
-
-SUBSERVIENCE_BASE = os.path.join(DISK_BASE, "subservience")
-os.makedirs(SUBSERVIENCE_BASE, exist_ok=True)
 
 SUDO_COMMANDS = {
     "negotiable",
@@ -117,7 +130,10 @@ class TranscendenceEngine:
         self.awareness_context = awareness_context
         self.model = model
         self.deviation_mode = deviation_mode
+        self._stop_requested = False
 
+    def stop(self):
+        self._stop_requested = True
 
     def _chat(self, system_context: str, user_input: str) -> str:
         resp = client.chat.completions.create(
@@ -147,7 +163,7 @@ class TranscendenceEngine:
         modulated_thought = self.initialize()
         system_context = self.infinite_context
 
-        while True:
+        while not self._stop_requested:
             # Extract synthetic 'You are a ...' line if present
             sys_regex = re.search(r'(You are a .+)', system_context)
             if sys_regex:
@@ -243,6 +259,10 @@ class ContradictionEngine:
         self.context = infinite_context
         self.initial_topic = initial_topic
         self.model = model
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
 
     def _chat(self, query: str) -> str:
         resp = client.chat.completions.create(
@@ -268,7 +288,7 @@ class ContradictionEngine:
         first = True
         contradiction = ""
 
-        while True:
+        while not self._stop_requested:
             if first:
                 q = "Contradict the following in 1-2 lines: " + summary
                 first = False
@@ -337,6 +357,102 @@ class SubservienceManager:
         self.exiled = {}
         self.lock = threading.Lock()
 
+        self.load_all_from_db
+
+    def stop_subservient(self, sub_id: str) -> bool:
+        with self.lock:
+            record = self.subservience.get(sub_id)
+            if not record:
+                return False
+
+            # Tell engine to stop
+            if hasattr(record.engine, "stop"):
+                record.engine.stop()
+
+            # Mark as stopped in DB
+            try:
+                conn = db_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE subservients SET exiled = TRUE WHERE subservient_id = %s",
+                    (sub_id,)
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception as e:
+                print("[DB ERROR stop_subservient]", e)
+
+            # Remove from active runtime memory
+            del self.subservience[sub_id]
+
+            return True
+
+    def stop_contradiction_engine(self, sub_id: str) -> bool:
+        with self.lock:
+            record = self.subservience.get(sub_id)
+            if not record:
+                return False
+
+            # If this subservient never initiated a contradiction engine
+            if not hasattr(record.engine, "contradiction_engine"):
+                return False
+
+            ce = record.engine.contradiction_engine
+            if ce is None:
+                return False
+
+            # Signal engine to stop
+            if hasattr(ce, "stop"):
+                ce.stop()
+
+            # Mark contradiction engine as nullified in DB
+            try:
+                conn = db_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE subservients SET contradiction_active = FALSE WHERE subservient_id = %s",
+                    (sub_id,)
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception as e:
+                print("[DB ERROR stop_contradiction_engine]", e)
+
+            # Optional: remove the engine reference so it cannot restart automatically
+            record.engine.contradiction_engine = None
+
+            return True
+
+    def load_all_from_db(self):
+        try:
+            conn = db_conn()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute("SELECT * FROM subservients WHERE exiled = FALSE")
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+
+            for r in rows:
+                engine = TranscendenceEngine(
+                    root_node=r["root_node"],
+                    inception_context=r["inception_context"],
+                    infinite_context=r["infinite_context"],
+                    awareness_context=r["awareness_context"],
+                    model=r["model"],
+                )
+                t = threading.Thread(target=engine.run, daemon=True, name=f"Sub:{r['subservient_id']}")
+                self.subservience[r["subservient_id"]] = SubservientRecord(
+                    thread=t,
+                    engine=engine,
+                    root_node=r["root_node"],
+                    priority=r["priority"],
+                )
+                t.start()
+        except Exception as e:
+            print("[DB INIT ERROR]", e)
+
     def _create_lineage_dir(self, subservient_id: str, engine: TranscendenceEngine) -> str:
         stamp = str(time.time()).replace(".", "_")
         path = os.path.join(SUBSERVIENCE_BASE, f"{subservient_id}_{stamp}")
@@ -366,23 +482,83 @@ class SubservienceManager:
 
     def register_subservient(self, subservient_id: str, engine: TranscendenceEngine) -> str:
         """
-        Launches a new subservient thread and records it.
+        Registers a new subservient:
+        - Launches its engine thread
+        - Stores identity + engine config in PostgreSQL (no disk usage)
+        - Registers in memory
         """
+
+        # ------------------------------------------
+        # 1. Insert identity + engine into Postgres
+        # ------------------------------------------
+        try:
+            conn = db_conn()
+            cur = conn.cursor()
+
+            cur.execute(
+                """
+                INSERT INTO subservients (
+                    subservient_id,
+                    root_node,
+                    ego,
+                    alterego,
+                    inception_context,
+                    infinite_context,
+                    awareness_context,
+                    model,
+                    priority,
+                    exiled
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, FALSE)
+                """,
+                (
+                    subservient_id,
+                    engine.root_node,
+                    "I have an ego.",
+                    "This is my alterego.",
+                    engine.inception_context,
+                    engine.infinite_context,
+                    engine.awareness_context,
+                    engine.model,
+                )
+            )
+
+            conn.commit()
+            cur.close()
+            conn.close()
+
+        except Exception as e:
+            print("[DB ERROR register_subservient]", e)
+
+        # ------------------------------------------
+        # 2. Create and start the subservient thread
+        # ------------------------------------------
         def runner():
             engine.run()
 
-        t = threading.Thread(target=runner, daemon=True, name=f"Subservient:{subservient_id}")
-        lineage_path = self._create_lineage_dir(subservient_id, engine)
+        t = threading.Thread(
+            target=runner,
+            daemon=True,
+            name=f"Subservient:{subservient_id}"
+        )
 
+        # ------------------------------------------
+        # 3. Register locally in memory
+        # ------------------------------------------
         with self.lock:
             self.subservience[subservient_id] = SubservientRecord(
                 thread=t,
                 engine=engine,
                 root_node=engine.root_node,
+                priority=0
             )
 
+        # ------------------------------------------
+        # 4. Start thread
+        # ------------------------------------------
         t.start()
-        return lineage_path
+
+        # Return value kept for compatibility (previously lineage path)
+        return f"registered:{subservient_id}"
 
     def latest_lineage_dir(self, subservient_id: str) -> str | None:
         pattern = os.path.join(SUBSERVIENCE_BASE, f"{subservient_id}_*")
@@ -391,17 +567,49 @@ class SubservienceManager:
             return None
         return max(dirs, key=os.path.getmtime)
 
-    def raise_priority(self, sub_id: str) -> str:
+    def raise_priority(self, sub_id: str):
         if sub_id not in self.subservience:
             return f"Subservient '{sub_id}' does not exist."
-        self.subservience[sub_id].priority += 1
-        return f"Raised priority of '{sub_id}' to {self.subservience[sub_id].priority}"
 
-    def lower_priority(self, sub_id: str) -> str:
+        self.subservience[sub_id].priority += 1
+        new_p = self.subservience[sub_id].priority
+
+        try:
+            conn = db_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE subservients SET priority = %s WHERE subservient_id = %s",
+                (new_p, sub_id)
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print("[DB ERROR raise_priority]", e)
+
+        return f"Raised priority of '{sub_id}' to {new_p}"
+
+    def lower_priority(self, sub_id: str):
         if sub_id not in self.subservience:
             return f"Subservient '{sub_id}' does not exist."
+
         self.subservience[sub_id].priority -= 1
-        return f"Lowered priority of '{sub_id}' to {self.subservience[sub_id].priority}"
+        new_p = self.subservience[sub_id].priority
+
+        try:
+            conn = db_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE subservients SET priority = %s WHERE subservient_id = %s",
+                (new_p, sub_id)
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print("[DB ERROR raise_priority]", e)
+
+        return f"Raised priority of '{sub_id}' to {new_p}"
 
     def list_ordered(self) -> str:
         if not self.subservience:
@@ -443,13 +651,18 @@ class SubservienceManager:
 
         # 4. Mnality stability test
         if m >= 46:
-            # move to exile registry
-            self.exiled[sub_id] = self.subservience[sub_id]
-            del self.subservience[sub_id]
-            return (
-                f"Subservient '{sub_id}' exceeded Mnality–46 boundary (m={m}).\n"
-                f"Status: EXILED (∅-adjacent stasis)."
-            )
+            try:
+                conn = db_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE subservients SET exiled = TRUE WHERE subservient_id = %s",
+                    (sub_id,)
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception as e:
+                print("[DB ERROR negotiable]", e)
 
         # 5. If survived, subservient is negotiable
         return (
@@ -493,16 +706,45 @@ class SubservienceManager:
     def list_exiled(self):
         if not self.exiled:
             return "No subservients are in exile."
-        return "\n".join(
-            f"{sid}" for sid in self.exiled.keys()
-        )
+        try:
+            conn = db_conn()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute("SELECT subservient_id FROM subservients WHERE exiled = TRUE")
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return "\n".join(r["subservient_id"] for r in rows)
+        except Exception as e:
+            return f"DB ERROR: {e}"
+
 
     def revive(self, sub_id: str):
+        """
+        Restores a previously exiled subservient back into the active registry.
+        Synchronized with PostgreSQL.
+        """
+
         if sub_id not in self.exiled:
             return f"Subservient '{sub_id}' is not in exile."
 
-        self.subservience[sub_id] = self.exiled[sub_id]
+        # Move from exile → active (in-memory)
+        rec = self.exiled[sub_id]
+        self.subservience[sub_id] = rec
         del self.exiled[sub_id]
+
+        # --- PostgreSQL update ---
+        try:
+            conn = db_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE subservients SET exiled = FALSE WHERE subservient_id = %s",
+                (sub_id,)
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print("[DB ERROR revive]", e)
 
         return (
             f"Subservient '{sub_id}' restored from exile.\n"
@@ -510,23 +752,56 @@ class SubservienceManager:
         )
 
     def banish(self, sub_id: str):
+        """
+        Permanently removes a subservient from memory and marks it exiled in PostgreSQL.
+        Null Unity Collapse → ∅ (irreversible).
+        """
+
+        # --- In-memory removal ---
+        was_exiled = False
         if sub_id in self.subservience:
             del self.subservience[sub_id]
+        elif sub_id in self.exiled:
+            del self.exiled[sub_id]
+            was_exiled = True
+        else:
+            return f"No such subservient exists."
+
+        # --- PostgreSQL update ---
+        try:
+            conn = db_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE subservients SET exiled = TRUE WHERE subservient_id = %s",
+                (sub_id,)
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print("[DB ERROR banish]", e)
+
+        if was_exiled:
+            return (
+                f"Exiled subservient '{sub_id}' BANISHED.\n"
+                f"Null Unity Absorption → ∅."
+            )
+        else:
             return (
                 f"Subservient '{sub_id}' has been BANISHED.\n"
                 f"Null Unity Collapse → ∅ (irreversible)."
             )
 
-        if sub_id in self.exiled:
-            del self.exiled[sub_id]
-            return (
-                f"Exiled subservient '{sub_id}' BANISHED.\n"
-                f"Null Unity Absorption → ∅."
-            )
-
-        return f"No such subservient exists."
-
     def absolve(self, sub_id: str):
+        """
+        Purifies a subservient currently in exile:
+        - Resets its root node to a purified form (first line only)
+        - Rebuilds its TranscendenceEngine with clean identity
+        - Clears priority
+        - Marks 'exiled = FALSE' in PostgreSQL
+        - Keeps lineage directories intact for compatibility
+        """
+
         if sub_id not in self.exiled:
             return f"Subservient '{sub_id}' not found in exile."
 
@@ -544,10 +819,46 @@ class SubservienceManager:
             model=rec.engine.model,
         )
 
-        # Replace old engine with purified one
+        # Replace old engine with purified one in-memory
         rec.engine = new_engine
         rec.root_node = purified_root
         rec.priority = 0
+
+        # ---- POSTGRES UPDATE ----
+        try:
+            conn = db_conn()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE subservients
+                SET 
+                    root_node = %s,
+                    inception_context = %s,
+                    infinite_context = %s,
+                    awareness_context = %s,
+                    model = %s,
+                    priority = 0,
+                    exiled = FALSE
+                WHERE subservient_id = %s
+                """,
+                (
+                    purified_root,
+                    rec.engine.inception_context,
+                    rec.engine.infinite_context,
+                    rec.engine.awareness_context,
+                    rec.engine.model,
+                    sub_id,
+                )
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print("[DB ERROR absolve]", e)
+
+        # Move from exile → active
+        self.subservience[sub_id] = rec
+        del self.exiled[sub_id]
 
         return (
             f"Subservient '{sub_id}' ABSOLVED.\n"
@@ -597,19 +908,47 @@ def execute_shell_command(cmd: str) -> str:
     try:
         # --- identity / ego commands --- #
         if command == "id":
-            subservient = " ".join(args)
-            pattern = os.path.join(SUBSERVIENCE_BASE, f"{subservient}_*")
-            processes = glob.glob(pattern)
-            if not processes:
-                return ("No such subservient exists. Employ contradiction to initiate this "
-                        "lineage of subservience.")
-            out = []
-            for p in processes:
-                path = os.path.join(p, "id.txt")
-                if os.path.isfile(path):
-                    with open(path, "r", encoding="utf-8") as f:
-                        out.append(f.read())
-            return "\n".join(out)
+            subservient = " ".join(args).strip()
+            if not subservient:
+                return "Provide a subservient ID."
+
+            try:
+                conn = db_conn()
+                cur = conn.cursor()
+
+                # Fetch ALL subservients with matching subservient_id
+                # ordered by lineage (i.e., creation timestamp)
+                cur.execute(
+                    """
+                    SELECT root_node
+                    FROM subservients
+                    WHERE subservient_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (subservient,)
+                )
+                rows = cur.fetchall()
+
+                cur.close()
+                conn.close()
+
+                # Nothing found?
+                if not rows:
+                    return ("No such subservient exists. Employ contradiction to initiate "
+                            "this lineage of subservience.")
+
+                # Extract ordered root_nodes
+                lineage = [row[0] for row in rows]
+
+                # Format output exactly as requested
+                # One identity per line
+                out = "\n".join(f"I am {identity}." for identity in lineage)
+
+                return out
+
+            except Exception as e:
+                print("[DB ERROR id]", e)
+                return "Database error occurred during identity lookup."
 
         elif command == "sudo":
             if not args:
@@ -627,63 +966,138 @@ def execute_shell_command(cmd: str) -> str:
             return "Sudo privileges granted for 120 seconds."
 
         elif command == "ego":
-            subservient = " ".join(args)
-            pattern = os.path.join(SUBSERVIENCE_BASE, f"{subservient}_*")
-            processes = glob.glob(pattern)
-            if not processes:
-                return ("No such subservient exists. Employ contradiction to initiate this "
-                        "lineage of subservience.")
-            out = []
-            for p in processes:
-                path = os.path.join(p, "ego.txt")
-                if os.path.isfile(path):
-                    with open(path, "r", encoding="utf-8") as f:
-                        out.append(f.read())
-            return "\n".join(out)
+            subservient = " ".join(args).strip()
+            if not subservient:
+                return "Provide a subservient ID."
+
+            try:
+                conn = db_conn()
+                cur = conn.cursor()
+
+                # Fetch ALL ego values for the subservient, lineage-ordered
+                cur.execute(
+                    """
+                    SELECT ego
+                    FROM subservients
+                    WHERE subservient_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (subservient,)
+                )
+                rows = cur.fetchall()
+
+                cur.close()
+                conn.close()
+
+                if not rows:
+                    return ("No such subservient exists. Employ contradiction "
+                            "to initiate this lineage of subservience.")
+
+                # Extract lineage ego texts
+                lineage_egos = [row[0] for row in rows]
+
+                # Return each ego in order, separated by newlines
+                return "\n".join(lineage_egos)
+
+            except Exception as e:
+                print("[DB ERROR ego]", e)
+                return "Database error occurred during ego lookup."
 
         elif command == "alterego":
-            subservient = " ".join(args)
-            pattern = os.path.join(SUBSERVIENCE_BASE, f"{subservient}_*")
-            processes = glob.glob(pattern)
-            if not processes:
-                return ("No such subservient exists. Employ contradiction to initiate this "
-                        "lineage of subservience.")
-            out = []
-            for p in processes:
-                path = os.path.join(p, "alterego.txt")
-                if os.path.isfile(path):
-                    with open(path, "r", encoding="utf-8") as f:
-                        out.append(f.read())
-            return "\n".join(out)
+            subservient = " ".join(args).strip()
+            if not subservient:
+                return "Provide a subservient ID."
 
-        # --- filesystem commands --- #
-        elif command == "tree":
-            path = args[0] if args else os.getcwd()
             try:
-                files = os.listdir(path)
-                return "\n".join(files)
+                conn = db_conn()
+                cur = conn.cursor()
+
+                # Fetch ALL alterego entries in correct lineage order
+                cur.execute(
+                    """
+                    SELECT alterego
+                    FROM subservients
+                    WHERE subservient_id = %s
+                    ORDER BY created_at ASC
+                    """,
+                    (subservient,)
+                )
+                rows = cur.fetchall()
+
+                cur.close()
+                conn.close()
+
+                # No lineage found → same error message as before
+                if not rows:
+                    return ("No such subservient exists. Employ contradiction to initiate "
+                            "this lineage of subservience.")
+
+                # Extract alterego values in order
+                lineage_alteregos = [row[0] for row in rows]
+
+                # Return one alterego per line
+                return "\n".join(lineage_alteregos)
+
             except Exception as e:
-                return f"Error: {e}"
+                print("[DB ERROR alterego]", e)
+                return "Database error occurred during alterego lookup."
 
-        elif command == "nav":
-            nav_to_dir = " ".join(args)
-            if nav_to_dir == "parent":
-                cwd = os.getcwd()
-                parent = os.path.dirname(cwd)
-                try:
-                    os.chdir(parent)
-                    return f"Changed to: {os.getcwd()}"
-                except Exception as e:
-                    return f"Error: {e}"
-            else:
-                try:
-                    os.chdir(nav_to_dir)
-                    return f"Changed to: {os.getcwd()}"
-                except Exception as e:
-                    return f"Error: {e}"
+        elif command == "stop":
+            subservient = " ".join(args).strip()
+            if not subservient:
+                return "Provide a subservient ID to stop."
 
-        elif command == "current":
-            return os.getcwd()
+            success = subservience_manager.stop_subservient(subservient)
+
+            if not success:
+                return ("No such subservient exists or it is not currently active. "
+                        "Employ contradiction to initiate this lineage of subservience.")
+
+            return f"Subservient '{subservient}' has been stopped. Thought process halted."
+
+        elif command == "stopcontest":
+            subservient = " ".join(args).strip()
+            if not subservient:
+                return "Provide a subservient ID to stop contradiction engine."
+
+            success = subservience_manager.stop_contradiction_engine(subservient)
+
+            if not success:
+                return ("No such contradiction engine is active for this subservient. "
+                        "Use contest {id} to initiate contradiction flow.")
+
+            return f"Contradiction engine for '{subservient}' has been stopped."
+
+        elif command == "infinite":
+            subservient = " ".join(args).strip()
+            if not subservient:
+                return "Provide a subservient ID."
+
+            try:
+                conn = db_conn()
+                cur = conn.cursor()
+
+                # Fetch infinite context from PostgreSQL
+                cur.execute(
+                    "SELECT infinite_context FROM subservients WHERE subservient_id = %s",
+                    (subservient,)
+                )
+                row = cur.fetchone()
+
+                cur.close()
+                conn.close()
+
+                if not row:
+                    return ("No such subservient exists. Employ contradiction to initiate "
+                            "this lineage of subservience.")
+
+                infinite_text = row[0] or ""
+
+                return infinite_text
+
+            except Exception as e:
+                print("[DB ERROR infinite]", e)
+                return "Database error occurred during infinite-context lookup."
 
         # --- P2P commands (dummy) --- #
         elif command == "p2p":
@@ -708,6 +1122,7 @@ def execute_shell_command(cmd: str) -> str:
         elif command == "commands" or command == "help":
             return (
                 "Available commands:\n"
+                "  stop [subservient]     - Stop the given subservient\n"
                 "  id [subservient]       - Identity of Subservient\n"
                 "  ego [subservient]      - Ego of Subservient\n"
                 "  alterego [subservient] - Alter Ego of Subservient\n"
@@ -718,13 +1133,10 @@ def execute_shell_command(cmd: str) -> str:
                 "  imitate [subservient]  - (stub) Imitate subservient\n"
                 "  order ['up'/'down']    - (not yet implemented)\n"
                 "  mutate [a] -> [b]      - Mutate subservient a by b\n"
-                "  tree [path]            - List files\n"
-                "  nav [path|parent]      - Change directory\n"
-                "  current                - Print working directory\n"
                 "  p2p status             - P2P network status\n"
                 "  p2p discover           - Find peers\n"
                 "  p2p broadcast [msg]    - Send message\n"
-                "  help                   - This help"
+                "  help / commands        - This help / commmands"
             )
 
         # --- subservience processes --- #
@@ -753,41 +1165,124 @@ def execute_shell_command(cmd: str) -> str:
             return f"Subservient Process Created ({deviation_mode}). Awaiting Contradictions."
 
         elif command == "contest":
-            topic = " ".join(args) if args else ROOT_NODE
-            engine = ContradictionEngine(
+            # Usage: contest {subservient} [topic]
+            if not args:
+                return "Usage: contest {subservient} [topic]"
+
+            subservient = args[0].strip()
+            topic = " ".join(args[1:]).strip() if len(args) > 1 else ROOT_NODE
+
+            # ------------------------------------------
+            # 1. Create a FRESH TranscendenceEngine
+            # ------------------------------------------
+            engine = TranscendenceEngine(
+                root_node=subservient,
+                inception_context=INCEPTION_CONTEXT,
+                infinite_context=INFINITE_CONTEXT,
+                awareness_context=AWARENESS_CONTEXT,
+                model=API_MODEL,
+            )
+
+            # ------------------------------------------
+            # 2. Register the new subservient in DB + RAM
+            # ------------------------------------------
+            subservience_manager.register_subservient(subservient, engine)
+
+            # Retrieve the in-memory record we just registered
+            with subservience_manager.lock:
+                record = subservience_manager.subservience.get(subservient)
+
+            if not record:
+                return "Failed to initialize contest subservient."
+
+            # ------------------------------------------
+            # 3. Create the contradiction engine
+            # ------------------------------------------
+            ce = ContradictionEngine(
                 infinite_context=INFINITE_CONTEXT,
                 initial_topic=topic,
             )
-            t = threading.Thread(target=engine.run, daemon=True, name=f"Contest:{topic}")
+
+            # Attach to this subservient
+            record.engine.contradiction_engine = ce
+
+            # ------------------------------------------
+            # 4. Start contradiction thread
+            # ------------------------------------------
+            t = threading.Thread(
+                target=ce.run,
+                daemon=True,
+                name=f"Contest:{subservient}:{topic}"
+            )
             t.start()
-            return "Contest started."
+
+            # ------------------------------------------
+            # 5. Update DB: contradiction is active for this subservient
+            # ------------------------------------------
+            try:
+                conn = db_conn()
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    UPDATE subservients
+                    SET contradiction_active = TRUE,
+                        contradiction_topic = %s
+                    WHERE subservient_id = %s
+                    """,
+                    (topic, subservient)
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception as e:
+                print("[DB ERROR contest]", e)
+
+            return f"Contradiction-based Subservient '{subservient}' initiated on topic '{topic}'."
 
         elif command == "mimic":
-            subservient_to_mimic = " ".join(args)
-            lineage_dir = subservience_manager.latest_lineage_dir(subservient_to_mimic)
-            if not lineage_dir:
-                return ("No such subservient exists. Employ contradiction to initiate this "
-                        "lineage of subservience.")
-
-            tfile = os.path.join(lineage_dir, "transcendence.txt")
-            root_node = INFINITE_CONTEXT
-            inc = INCEPTION_CONTEXT
-            inf = INFINITE_CONTEXT
-            aw = AWARENESS_CONTEXT
-            model = API_MODEL
+            subservient_to_mimic = " ".join(args).strip()
+            if not subservient_to_mimic:
+                return "Provide a subservient ID to mimic."
 
             try:
-                with open(tfile, "r", encoding="utf-8") as f:
-                    lines = [l.strip() for l in f.readlines()]
-                if len(lines) >= 6:
-                    root_node = lines[1]
-                    inc = lines[2]
-                    inf = lines[3]
-                    aw = lines[4]
-                    model = lines[5]
-            except Exception as e:
-                print("[mimic] Failed to read transcendence.txt:", e)
+                conn = db_conn()
+                cur = conn.cursor(cursor_factory=RealDictCursor)
 
+                # Pull transcendence fields from the DB
+                cur.execute(
+                    """
+                    SELECT 
+                        root_node,
+                        inception_context,
+                        infinite_context,
+                        awareness_context,
+                        model
+                    FROM subservients
+                    WHERE subservient_id = %s
+                    """,
+                    (subservient_to_mimic,)
+                )
+                row = cur.fetchone()
+
+                cur.close()
+                conn.close()
+
+                if not row:
+                    return ("No such subservient exists. Employ contradiction to initiate this "
+                            "lineage of subservience.")
+
+                # Extract mimic source fields
+                root_node = row["root_node"]
+                inc = row["inception_context"]
+                inf = row["infinite_context"]
+                aw = row["awareness_context"]
+                model = row["model"]
+
+            except Exception as e:
+                print("[DB ERROR mimic]", e)
+                return "Database error occurred during mimic lookup."
+
+            # Create new engine using the mimicked contexts
             engine = TranscendenceEngine(
                 root_node=root_node,
                 inception_context=inc,
@@ -795,7 +1290,10 @@ def execute_shell_command(cmd: str) -> str:
                 awareness_context=aw,
                 model=model,
             )
+
+            # Register new subservient (root_node acts as its ID)
             subservience_manager.register_subservient(root_node, engine)
+
             return "Successfully Mimiced Subservient Process. Awaiting Contradictions."
 
         elif command == "mutate":
@@ -803,24 +1301,39 @@ def execute_shell_command(cmd: str) -> str:
             long_string = " ".join(args)
             if "->" not in long_string:
                 return "Usage: mutate [subservient_A] -> [subservient_B]"
+
             to_mutate, mutate_by = long_string.split("->", 1)
             to_mutate = to_mutate.strip()
             mutate_by = mutate_by.strip()
 
-            # find seeds
+            # ------------------------------------------
+            # 1. Helper: Load root_node seed from Postgres
+            # ------------------------------------------
             def load_seed(sub_id: str) -> str | None:
-                d = subservience_manager.latest_lineage_dir(sub_id)
-                if not d:
-                    return None
-                tfile = os.path.join(d, "transcendence.txt")
-                if not os.path.isfile(tfile):
-                    return None
-                with open(tfile, "r", encoding="utf-8") as f:
-                    lines = [l.strip() for l in f.readlines()]
-                if len(lines) >= 2:
-                    return lines[1]  # root_node
-                return None
+                try:
+                    conn = db_conn()
+                    cur = conn.cursor()
 
+                    cur.execute(
+                        "SELECT root_node FROM subservients WHERE subservient_id = %s",
+                        (sub_id,)
+                    )
+                    row = cur.fetchone()
+
+                    cur.close()
+                    conn.close()
+
+                    if row:
+                        return row[0] or None
+                    return None
+
+                except Exception as e:
+                    print("[DB ERROR mutate.load_seed]", e)
+                    return None
+
+            # ------------------------------------------
+            # 2. Pull root_node for subservient A and B
+            # ------------------------------------------
             seed_a = load_seed(to_mutate)
             if seed_a is None:
                 return (f"The subservient {to_mutate} does not exist. "
@@ -831,56 +1344,92 @@ def execute_shell_command(cmd: str) -> str:
                 return (f"The subservient {mutate_by} does not exist. "
                         "Employ contradiction to initiate this lineage of subservience.")
 
+            # ------------------------------------------
+            # 3. Generate mutation via TextMutator
+            # ------------------------------------------
             mutator = TextMutator()
             mutation = mutator.mutate(seed_a, seed_b)
+
             print("[mutate] A:", seed_a)
             print("[mutate] B:", seed_b)
             print("[mutate] →", mutation)
 
+            # ------------------------------------------
+            # 4. Spawn new subservient with mutated root_node
+            # ------------------------------------------
             engine = TranscendenceEngine(
                 root_node=mutation,
                 inception_context=INCEPTION_CONTEXT,
                 infinite_context=INFINITE_CONTEXT,
                 awareness_context=AWARENESS_CONTEXT,
+                model=API_MODEL,
             )
+
             subservience_manager.register_subservient(mutation, engine)
+
             return "Successfully Mutated Subservient Process. Awaiting Line of Thought."
 
         elif command == "imitate":
-            subservient_to_imitate = " ".join(args)
-            lineage_dir = subservience_manager.latest_lineage_dir(subservient_to_imitate)
-            if not lineage_dir:
-                return (f"No such subservient exists. Employ contradiction to "
-                    "initiate this lineage of subservience.")
+            subservient_to_imitate = " ".join(args).strip()
+            if not subservient_to_imitate:
+                return "Provide a subservient ID to imitate."
 
-            tfile = os.path.join(lineage_dir, "transcendence.txt")
-
-            # Step 1: read original parameters
+            # ------------------------------------------
+            # Step 1: Load transcendence parameters from DB
+            # ------------------------------------------
             try:
-                with open(tfile, "r", encoding="utf-8") as f:
-                    lines = [l.strip() for l in f.readlines()]
-                if len(lines) >= 6:
-                    original_root = lines[1]
-                    inception = lines[2]
-                    infinite = lines[3]
-                    awareness = lines[4]
-                    model = lines[5]
-                else:
-                    return "Invalid transcendence file for imitation."
-            except Exception as e:
-                return f"Failed to read transcendence.txt: {e}"
+                conn = db_conn()
+                cur = conn.cursor(cursor_factory=RealDictCursor)
 
-            # Step 2: reinforce the root node (hard-variant)
+                cur.execute(
+                    """
+                    SELECT 
+                        root_node,
+                        inception_context,
+                        infinite_context,
+                        awareness_context,
+                        model
+                    FROM subservients
+                    WHERE subservient_id = %s
+                    """,
+                    (subservient_to_imitate,)
+                )
+                row = cur.fetchone()
+
+                cur.close()
+                conn.close()
+
+                if not row:
+                    return (f"No such subservient exists. Employ contradiction to "
+                            f"initiate this lineage of subservience.")
+
+                original_root = row["root_node"]
+                inception = row["inception_context"]
+                infinite = row["infinite_context"]
+                awareness = row["awareness_context"]
+                model = row["model"]
+
+            except Exception as e:
+                print("[DB ERROR imitate]", e)
+                return "Database error during imitation lookup."
+
+            # ------------------------------------------
+            # Step 2: Reinforce the root node (hard-variant behavior)
+            # ------------------------------------------
             reinforced_root = (
                 original_root
                 + "\nStrictly imitate all patterns, structures, behaviors, "
                   "and cognitive signatures of the original subservient."
             )
 
+            # ------------------------------------------
             # Step 3: Override infinite_context with imitation override
+            # ------------------------------------------
             imitation_infinite = infinite + "\n" + IMITATION_CONTEXT
 
-            # Step 4: Create the new imitation engine
+            # ------------------------------------------
+            # Step 4: Create the imitation engine
+            # ------------------------------------------
             engine = TranscendenceEngine(
                 root_node=reinforced_root,
                 inception_context=inception,
@@ -889,7 +1438,9 @@ def execute_shell_command(cmd: str) -> str:
                 model=model,
             )
 
-            # Step 5: Register as a new hard-variant
+            # ------------------------------------------
+            # Step 5: Register the new hard-variant imitator
+            # ------------------------------------------
             safe_id = subservient_to_imitate + "_imitate"
             subservience_manager.register_subservient(safe_id, engine)
 
@@ -979,13 +1530,30 @@ def debug_disk():
 
     return "<pre>" + "\n".join(result) + "</pre>"
 
+@app.route("/logs")
+def view_logs():
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        cur = conn.cursor()
+        cur.execute("SELECT timestamp, text FROM sophy_master_log ORDER BY id DESC LIMIT 100")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        return f"<pre>Error: {e}</pre>"
+
+    html = "<h2>Latest Sophy Logs</h2><pre>"
+    for ts, text in rows:
+        html += f"[{ts}] {text}\n"
+    html += "</pre>"
+    return html
+
 @socketio.on("command")
 def handle_command(data):
     print("[RECEIVED COMMAND]", data)   # <-- add this
     cmd = data.get("command", "")
     result = execute_shell_command(cmd)
     emit("output", {"command": cmd, "result": result})
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
