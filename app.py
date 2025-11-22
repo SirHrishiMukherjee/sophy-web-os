@@ -467,6 +467,55 @@ class SubservienceManager:
 
             return True
 
+    def cease_all(self) -> str:
+        """
+        Stops ALL active subservients and ALL contradiction engines (global kill-switch).
+        Fully halts all runtime threads and marks them exiled in PostgreSQL.
+        """
+
+        with self.lock:
+            keys = list(self.subservience.keys())
+
+            for runtime_key in keys:
+                rec = self.subservience.get(runtime_key)
+                if not rec:
+                    continue
+
+                engine = rec.engine
+
+                # Stop transcendence engine
+                if hasattr(engine, "stop"):
+                    try:
+                        engine.stop()
+                    except Exception as e:
+                        print(f"[CEASE_ALL STOP ENGINE ERROR] {runtime_key}: {e}")
+
+                # Stop contradiction engine if present
+                ce = getattr(engine, "contradiction_engine", None)
+                if ce and hasattr(ce, "stop"):
+                    try:
+                        ce.stop()
+                    except Exception as e:
+                        print(f"[CEASE_ALL STOP CONTRADICTION ERROR] {runtime_key}: {e}")
+
+                # Remove from live memory
+                del self.subservience[runtime_key]
+
+        # ------------------------------------------
+        # Mark *all* subservients as exiled in DB
+        # ------------------------------------------
+        try:
+            conn = db_conn()
+            cur = conn.cursor()
+            cur.execute("UPDATE subservients SET exiled = TRUE")
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print("[DB ERROR cease_all]", e)
+
+        return "All subservients and contests have been fully terminated."
+
     def load_all_from_db(self):
         try:
             conn = db_conn()
@@ -1183,6 +1232,9 @@ def execute_shell_command(cmd: str) -> str:
             except Exception as e:
                 print("[DB ERROR infinite]", e)
                 return "Database error occurred during infinite-context lookup."
+
+        elif command == "cease" and args and args[0] == "all":
+            return subservience_manager.cease_all()
 
         # --- P2P commands (dummy) --- #
         elif command == "p2p":
