@@ -163,6 +163,8 @@ SUDO_COMMANDS = {
     "current",
 }
 
+MAX_SUBSERVIENTS = 30  # Hard global max
+
 SOPHY_SUDO_PASSWORD = os.getenv("SOPHY_SUDO_PASSWORD")
 
 # =========================
@@ -421,6 +423,14 @@ class SubservienceManager:
 
         self.load_all_from_db
 
+    def can_spawn_new(self) -> bool:
+        with self.lock:
+            active_count = sum(
+                1 for rec in self.subservience.values()
+                if not getattr(rec, "exiled", False)
+            )
+            return active_count < MAX_SUBSERVIENTS
+
     def stop_subservient(self, sub_id: str) -> bool:
         """
         Stops ALL active runtime instances of a given subservient_id.
@@ -656,10 +666,27 @@ class SubservienceManager:
     def register_subservient(self, subservient_id: str, engine: TranscendenceEngine) -> str:
         """
         Registers a new subservient:
+        - Limits global subservient count (active != exiled)
         - Launches its engine thread
         - Stores identity + engine config in PostgreSQL
         - Registers in memory (multi-lineage safe)
         """
+
+        # ==========================================================
+        # GLOBAL LIMIT CHECK — before any spawning or DB insertion
+        # ==========================================================
+        with self.lock:
+            active_count = sum(
+                1 for rec in self.subservience.values()
+                if not getattr(rec, "exiled", False)
+            )
+
+            if active_count >= MAX_SUBSERVIENTS:
+                return (
+                    f"Room is full. "
+                    f"No more thought processes allowed at this moment. "
+                    f"Wait for existing thought processes to complete before creating new ones."
+                )
 
         # ------------------------------------------
         # 1. Insert lineage entry into Postgres
@@ -714,7 +741,7 @@ class SubservienceManager:
         )
 
         # ------------------------------------------
-        # 3. Register locally in memory with a unique runtime key
+        # 3. Register locally in memory with runtime key
         # ------------------------------------------
         runtime_key = f"{subservient_id}#{uuid.uuid4().hex[:6]}"
 
@@ -723,12 +750,12 @@ class SubservienceManager:
                 thread=t,
                 engine=engine,
                 root_node=engine.root_node,
-                subservient_id=subservient_id,   # <-- CRITICAL FIX
+                subservient_id=subservient_id,
                 priority=0,
             )
 
         # ------------------------------------------
-        # 4. Start thread
+        # 4. Start engine thread
         # ------------------------------------------
         t.start()
 
@@ -1417,6 +1444,18 @@ def execute_shell_command(cmd: str) -> str:
 
             topic = " ".join(topic_parts) if topic_parts else ROOT_NODE
 
+            # Character length limit for contradiction commands
+            if len(topic) > 100:
+                return f"contradiction input too long ({len(topic)} characters). Limit is 100."
+
+            # GLOBAL SUBSERVIENT LIMIT
+            if not subservience_manager.can_spawn_new():
+                return (
+                    f"Room is full. "
+                    f"No more thought processes allowed at this moment. "
+                    f"Wait for existing thought processes to complete before creating new ones."
+                )
+
             engine = TranscendenceEngine(
                 root_node=topic,
                 inception_context=INCEPTION_CONTEXT,
@@ -1427,6 +1466,7 @@ def execute_shell_command(cmd: str) -> str:
 
             subservience_manager.register_subservient(topic, engine)
             return f"Subservient Process Created ({deviation_mode}). Awaiting Contradictions."
+
 
         elif command == "contest":
             # ------------------------------------------
@@ -1439,10 +1479,21 @@ def execute_shell_command(cmd: str) -> str:
             if not topic:
                 return "Usage: contest <topic>"
 
+            # Character length limit for contest commands
+            if len(topic) > 100:
+                return f"contest input too long ({len(topic)} characters). Limit is 100."
+
+            # GLOBAL SUBSERVIENT LIMIT
+            if not subservience_manager.can_spawn_new():
+                return (
+                    f"Room is full. "
+                    f"No more thought processes allowed at this moment. "
+                    f"Wait for existing thought processes to complete before creating new ones."
+                )
+
             # ------------------------------------------
             # 1. Auto-generate subservient_id
             # ------------------------------------------
-            # Step 1 — sanitize topic + create readable ID
             safe_topic = re.sub(r"[^a-zA-Z0-9_]+", "_", topic.strip())
             base_id = f"{safe_topic}_contest"
 
@@ -1510,6 +1561,13 @@ def execute_shell_command(cmd: str) -> str:
             return f"Contradiction-based Subservient '{base_id}' initiated on topic '{topic}'."
 
         elif command == "mimic":
+            # Enforce global hard limit regardless of command type
+            if not subservience_manager.can_spawn_new():
+                return (
+                    f"Room is full. "
+                    f"No more thought processes allowed at this moment. "
+                    f"Wait for existing thought processes to complete before creating new ones."
+                )
             subservient_to_mimic = " ".join(args).strip()
             if not subservient_to_mimic:
                 return "Provide a subservient ID to mimic."
@@ -1576,6 +1634,13 @@ def execute_shell_command(cmd: str) -> str:
             return f"Successfully Mimicked '{subservient_to_mimic}'. A new lineage entry has been created."
 
         elif command == "mutate":
+            # Enforce global hard limit regardless of command type
+            if not subservience_manager.can_spawn_new():
+                return (
+                    f"Room is full. "
+                    f"No more thought processes allowed at this moment. "
+                    f"Wait for existing thought processes to complete before creating new ones."
+                )
             # Format: mutate <A> -> <B>
             long_string = " ".join(args)
             if "->" not in long_string:
@@ -1649,6 +1714,13 @@ def execute_shell_command(cmd: str) -> str:
             return "Successfully Mutated Subservient Process. Awaiting Line of Thought."
 
         elif command == "imitate":
+            # Enforce global hard limit regardless of command type
+            if not subservience_manager.can_spawn_new():
+                return (
+                    f"Room is full. "
+                    f"No more thought processes allowed at this moment. "
+                    f"Wait for existing thought processes to complete before creating new ones."
+                )
             subservient_to_imitate = " ".join(args).strip()
             if not subservient_to_imitate:
                 return "Provide a subservient ID to imitate."
