@@ -5,9 +5,39 @@
     <title>SOPHY Web OS</title>
     <link rel="stylesheet" href="/static/style.css">
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        #pause-indicator {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 99999;
+            font-family: "Courier New", monospace;
+            font-size: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(0,255,255,0.10);
+            padding: 6px 12px;
+            border: 1px solid rgba(0,255,255,0.3);
+            border-radius: 6px;
+        }
 
+        .dot-green, .dot-red {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .dot-green { background: #00ff00; }
+        .dot-red   { background: #ff3333; }
+        </style>
 </head>
 <body>
+    <div id="pause-indicator">
+        <span id="pause-label">PLAY</span>
+        <span id="pause-dot" class="dot-green"></span>
+    </div>
+
     <!-- Floating Avatar -->
     <div id="avatar-ball" title="SOPHY Avatar"></div>
 

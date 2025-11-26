@@ -67,4 +67,18 @@ document.addEventListener("DOMContentLoaded", function () {
         avatar.style.cursor = "grab";
     });
 
+    // Listen for pause/play updates from server
+    socket.on("pause_state", function (data) {
+        const label = document.getElementById("pause-label");
+        const dot   = document.getElementById("pause-dot");
+
+        if (data.state === "paused") {
+            label.textContent = "PAUSE";
+            dot.className = "dot-red";
+        } else {
+            label.textContent = "PLAY";
+            dot.className = "dot-green";
+        }
+    });
+
 });

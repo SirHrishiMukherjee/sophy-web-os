@@ -10,6 +10,7 @@ import random
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
+from datetime import datetime
 
 # ===========================
 # SUDO STATE
@@ -33,6 +34,24 @@ class SudoState:
         return True
 
 sudo_state = SudoState()
+
+# ===========================
+# GLOBAL PAUSE/PLAY STATE
+# ===========================
+class PauseState:
+    def __init__(self):
+        self.paused = False
+        self.timestamp = 0
+
+    def pause(self):
+        self.paused = True
+        self.timestamp = time.time()
+
+    def play(self):
+        self.paused = False
+
+PAUSE_COMMAND_PASSWORD = os.getenv("SOPHY_PAUSE_PASSWORD")
+PLAY_COMMAND_PASSWORD  = os.getenv("SOPHY_PLAY_PASSWORD")
 
 # ====================================================
 # SELECTIVE MASTER LOGGING
@@ -66,6 +85,48 @@ def master_log(*args, **kwargs):
 
 def db_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+def get_pause_from_db():
+    try:
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT paused FROM system_state LIMIT 1;")
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            return row[0]
+        return False
+    except Exception as e:
+        print(f"[PAUSE_DB_LOAD_ERROR] {e}")
+        return False
+
+
+def update_pause_in_db(paused: bool):
+    try:
+        conn = db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE system_state
+            SET paused = %s, updated_at = NOW()
+            WHERE id = 1
+            """,
+            (paused,)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[PAUSE_DB_UPDATE_ERROR] {e}")
+
+pause_state = PauseState()
+
+# Restore persisted PAUSE state on restart
+if get_pause_from_db():
+    pause_state.pause()
+    print("[BOOT] System restored in PAUSE mode.")
+else:
+    pause_state.play()
+    print("[BOOT] System restored in PLAY mode.")
 
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
@@ -1039,6 +1100,25 @@ def execute_shell_command(cmd: str) -> str:
 
     args = parts[1:]
 
+    # ============================================================
+    #  GLOBAL PAUSE BLOCK
+    # ============================================================
+    # Commands allowed during PAUSE:
+    #   sudo <password>
+    #   pause <pause-pass>
+    #   play <play-pass>
+    # ============================================================
+
+    if pause_state.paused:
+        if command == "sudo":
+            pass  # allow sudo while paused
+        elif command == "pause":
+            pass  # allow re-pause attempts (no effect)
+        elif command == "play":
+            pass  # allow play to resume
+        else:
+            return "System is PAUSED. All commands blocked."
+
     try:
         # --- identity / ego commands --- #
         if command == "id":
@@ -1098,6 +1178,52 @@ def execute_shell_command(cmd: str) -> str:
 
             sudo_state.activate()
             return "Sudo privileges granted for 120 seconds."
+
+        # ====================================================
+        # SECRET COMMAND: PAUSE (sudo-only, 2nd password)
+        # ====================================================
+        elif command == "pause":
+            if not sudo_state.check():
+                return "Permission denied: 'pause' requires sudo."
+
+            if not args:
+                return "pause requires secondary password."
+
+            pw2 = args[0].strip()
+
+            if PAUSE_COMMAND_PASSWORD is None:
+                return "Pause password not configured."
+
+            if pw2 != PAUSE_COMMAND_PASSWORD:
+                return "Incorrect pause password."
+
+            pause_state.pause()
+            update_pause_in_db(True)
+            socketio.emit("pause_state", {"state": "paused"})
+            return "SYSTEM PAUSED. All commands blocked."
+
+        # ====================================================
+        # SECRET COMMAND: PLAY (sudo-only, 2nd password)
+        # ====================================================
+        elif command == "play":
+            if not sudo_state.check():
+                return "Permission denied: 'play' requires sudo."
+
+            if not args:
+                return "play requires secondary password."
+
+            pw2 = args[0].strip()
+
+            if PLAY_COMMAND_PASSWORD is None:
+                return "Play password not configured."
+
+            if pw2 != PLAY_COMMAND_PASSWORD:
+                return "Incorrect play password."
+
+            pause_state.play()
+            update_pause_in_db(False)
+            socketio.emit("pause_state", {"state": "play"})
+            return "SYSTEM RESUMED. All commands enabled."
 
         elif command == "ego":
             subservient = " ".join(args).strip()
@@ -1701,12 +1827,105 @@ def view_logs():
     html += "</pre>"
     return html
 
+@app.route("/subservients")
+def list_subservients():
+    """
+    Neatly prints all subservients from the PostgreSQL table 'subservients'.
+    """
+    try:
+        conn = db_conn()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT 
+                id,
+                subservient_id,
+                root_node,
+                priority,
+                exiled,
+                created_at
+            FROM subservients
+            ORDER BY created_at ASC
+        """)
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            return "<pre>No subservients found.</pre>"
+
+        # Format output
+        lines = []
+        for r in rows:
+            lines.append(
+                f"ID: {r[0]}\n"
+                f"Subservient: {r[1]}\n"
+                f"Root Node: {r[2]}\n"
+                f"Priority: {r[3]}\n"
+                f"Exiled: {r[4]}\n"
+                f"Created: {r[5]}\n"
+                "----------------------------------------"
+            )
+
+        return "<pre>" + "\n".join(lines) + "</pre>"
+
+    except Exception as e:
+        return f"<pre>Error: {e}</pre>"
+
+@app.route("/subservients_simple")
+def list_subservients_simple():
+    """
+    Neatly prints all subservients from the PostgreSQL table 'subservients'.
+    """
+    try:
+        conn = db_conn()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT 
+                id,
+                subservient_id,
+                root_node,
+                priority,
+                exiled,
+                created_at
+            FROM subservients
+            ORDER BY created_at ASC
+        """)
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            return "<pre>No subservients found.</pre>"
+
+        # Format output
+        lines = []
+        for r in rows:
+            lines.append(
+                f"Subservient: {r[1]}\n"
+            )
+
+        return "<pre>" + "\n".join(lines) + "</pre>"
+
+    except Exception as e:
+        return f"<pre>Error: {e}</pre>"
+
 @socketio.on("command")
 def handle_command(data):
     print("[RECEIVED COMMAND]", data)   # <-- add this
     cmd = data.get("command", "")
     result = execute_shell_command(cmd)
     emit("output", {"command": cmd, "result": result})
+
+@socketio.on("connect")
+def on_connect():
+    # Send current pause state to newly connected client
+    socketio.emit("pause_state", {
+        "state": "paused" if pause_state.paused else "play"
+    })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
