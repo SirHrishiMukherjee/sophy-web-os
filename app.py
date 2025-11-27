@@ -1992,12 +1992,32 @@ def handle_command(data):
     result = execute_shell_command(cmd)
     emit("output", {"command": cmd, "result": result})
 
+# =========================
+# LIVE VISITOR COUNT
+# =========================
+live_visitors = 0
+
+def broadcast_visitors():
+    socketio.emit("visitor_count", {"count": live_visitors})
+
+
 @socketio.on("connect")
 def on_connect():
-    # Send current pause state to newly connected client
-    socketio.emit("pause_state", {
-        "state": "paused" if pause_state.paused else "play"
-    })
+    global live_visitors
+    live_visitors += 1
+    broadcast_visitors()
+
+    # Send current pause state only to this client
+    emit("pause_state", {"state": "paused" if pause_state.paused else "play"})
+
+
+@socketio.on("disconnect")
+def on_disconnect():
+    global live_visitors
+    if live_visitors > 0:
+        live_visitors -= 1
+    broadcast_visitors()
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

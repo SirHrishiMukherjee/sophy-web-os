@@ -81,4 +81,13 @@ document.addEventListener("DOMContentLoaded", function () {
         }
     });
 
+    socket.on("visitor_count", function(data) {
+        const label = document.getElementById("visitor-label");
+        const dot = document.getElementById("visitor-dot");
+        if (!label || !dot) return;
+
+        label.textContent = `${data.count} live visitors`;
+        dot.className = "dot-orange"; // class set in CSS below
+    });
+
 });

@@ -118,3 +118,16 @@ body {
 .dot-green { background: #00ff00; }
 .dot-red   { background: #ff3333; }
 
+#visitor-label {
+    font-size: 14px;
+    color: #ffa500;
+}
+
+.dot-orange {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ffa500;
+    margin-right: 5px;
+}
+
